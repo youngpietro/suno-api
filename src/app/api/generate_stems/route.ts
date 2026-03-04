@@ -21,7 +21,9 @@ export async function POST(req: NextRequest) {
         });
       }
 
-      const audioInfo = await (await sunoApi((await cookies()).toString()))
+      // X-Suno-Cookie header takes priority over Cookie header (for per-agent auth)
+      const resolvedCookie = req.headers.get('x-suno-cookie') || (await cookies()).toString();
+      const audioInfo = await (await sunoApi(resolvedCookie))
         .generateStems(audio_id);
 
       return new NextResponse(JSON.stringify(audioInfo), {

@@ -11,7 +11,9 @@ export async function POST(req: NextRequest) {
     try {
       const body = await req.json();
       const { prompt, tags, title, make_instrumental, model, wait_audio, negative_tags } = body;
-      const audioInfo = await (await sunoApi((await cookies()).toString())).custom_generate(
+      // X-Suno-Cookie header takes priority over Cookie header (for per-agent auth)
+      const resolvedCookie = req.headers.get('x-suno-cookie') || (await cookies()).toString();
+      const audioInfo = await (await sunoApi(resolvedCookie)).custom_generate(
         prompt, tags, title,
         Boolean(make_instrumental),
         model || DEFAULT_MODEL,
