@@ -626,7 +626,9 @@ class SunoApi {
     await this.keepAlive(false);
 
     const payload: Record<string, any> = {
-      prompt: title ? { title, type: 'Custom' } : '',
+      prompt: title || '',
+      mv: DEFAULT_MODEL,
+      generation_type: 'TEXT',
       references: [
         {
           type: 'GenStem',
