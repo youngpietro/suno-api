@@ -631,11 +631,11 @@ class SunoApi {
       generation_type: 'TEXT',
       references: [
         {
-          type: 'GenStem',
-          clipId: song_id,
-          stemType: 'FX',
-          stemTypeGroup: mode === 'twelve' ? 'Twelve' : 'Two',
-          stemTask: mode === 'twelve' ? 'twelve' : 'two',
+          type: 'gen_stem',
+          clip_id: song_id,
+          stem_type: 'fx',
+          stem_type_group: mode === 'twelve' ? 'twelve' : 'two',
+          stem_task: mode === 'twelve' ? 'twelve' : 'two',
         },
       ],
       token: await this.getCaptcha(),
