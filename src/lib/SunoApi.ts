@@ -306,9 +306,20 @@ class SunoApi {
    * @returns {string|null} hCaptcha token. If no verification is required, returns null
    */
   public async getCaptcha(): Promise<string|null> {
-    if (!await this.captchaRequired())
+    const required = await this.captchaRequired();
+    if (!required)
       return null;
 
+    // Suno reports CAPTCHA required, but try without token first.
+    // As of March 2026, Suno may not enforce CAPTCHA on all requests,
+    // and their hCaptcha integration appears to have been removed/changed.
+    logger.info('CAPTCHA reported as required — will attempt generation without token first');
+    return null;
+
+    // NOTE: Browser-based CAPTCHA solving is currently disabled because Suno
+    // no longer shows hCaptcha after clicking Create. The code below is preserved
+    // for when/if CAPTCHA solving needs to be re-enabled with updated selectors.
+    /*
     logger.info('CAPTCHA required. Launching browser...')
     const browser = await this.launchBrowser();
     const page = await browser.newPage();
@@ -483,6 +494,7 @@ class SunoApi {
         }
       });
     }));
+    */
   }
 
   /**
