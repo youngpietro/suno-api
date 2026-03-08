@@ -638,7 +638,6 @@ class SunoApi {
           stem_task: mode === 'twelve' ? 'twelve' : 'two',
         },
       ],
-      token: await this.getCaptcha(),
     };
 
     logger.info('generateStems payload:\n' + JSON.stringify(payload, null, 2));
