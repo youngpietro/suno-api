@@ -18,7 +18,7 @@ const cache = globalForSunoApi.sunoApiCache || new Map<string, SunoApi>();
 globalForSunoApi.sunoApiCache = cache;
 
 const logger = pino();
-export const DEFAULT_MODEL = 'chirp-v3-5';
+export const DEFAULT_MODEL = 'chirp-crow';
 
 export interface AudioInfo {
   id: string; // Unique identifier for the audio
@@ -67,6 +67,9 @@ interface PersonaResponse {
   is_following: boolean;
 }
 
+// Cookie persistence path
+const COOKIE_PERSIST_PATH = path.join(process.cwd(), '.suno-cookies.json');
+
 class SunoApi {
   private static BASE_URL: string = 'https://studio-api.prod.suno.com';
   private static CLERK_BASE_URL: string = 'https://auth.suno.com';
@@ -82,6 +85,12 @@ class SunoApi {
   private solver = new Solver(process.env.TWOCAPTCHA_KEY + '');
   private ghostCursorEnabled = yn(process.env.BROWSER_GHOST_CURSOR, { default: false });
   private cursor?: Cursor;
+
+  // Cookie health tracking
+  public initializedAt: Date = new Date();
+  public lastKeepAlive: Date = new Date();
+  public cookieSource: 'header' | 'persisted' | 'env' | 'api_update' = 'env';
+  private originalCookieKey?: string; // cache key for clearing on update
 
   constructor(cookies: string) {
     this.userAgent = new UserAgent(/Macintosh/).random().toString(); // Usually Mac systems get less amount of CAPTCHAs
@@ -113,8 +122,16 @@ class SunoApi {
       const setCookieHeader = resp.headers['set-cookie'];
       if (Array.isArray(setCookieHeader)) {
         const newCookies = cookie.parse(setCookieHeader.join('; '));
+        let cookiesChanged = false;
         for (const [key, value] of Object.entries(newCookies)) {
-          this.cookies[key] = value;
+          if (this.cookies[key] !== value) {
+            this.cookies[key] = value;
+            cookiesChanged = true;
+          }
+        }
+        // Persist refreshed cookies to survive restarts
+        if (cookiesChanged) {
+          this.persistCookies().catch(() => {});
         }
       }
       return resp;
@@ -188,6 +205,7 @@ class SunoApi {
     const newToken = renewResponse.data.jwt;
     // Update Authorization field in request header with the new JWT token
     this.currentToken = newToken;
+    this.lastKeepAlive = new Date();
   }
 
   /**
@@ -741,13 +759,112 @@ class SunoApi {
 
     return response.data;
   }
+
+  /**
+   * Persist current cookies to disk so they survive Railway restarts.
+   */
+  public async persistCookies(): Promise<void> {
+    try {
+      const data = JSON.stringify({
+        cookies: this.cookies,
+        updatedAt: new Date().toISOString(),
+        source: this.cookieSource,
+      });
+      await fs.writeFile(COOKIE_PERSIST_PATH, data, 'utf-8');
+      logger.info('Cookies persisted to disk');
+    } catch (err) {
+      logger.error('Failed to persist cookies:', err);
+    }
+  }
+
+  /**
+   * Get health/status info about the current cookie and session.
+   */
+  public async getHealthStatus(): Promise<object> {
+    const uptimeMs = Date.now() - this.initializedAt.getTime();
+    const sinceLastKeepAlive = Date.now() - this.lastKeepAlive.getTime();
+
+    let creditsInfo: object | null = null;
+    let sessionValid = false;
+    try {
+      creditsInfo = await this.get_credits();
+      sessionValid = true;
+    } catch (err: any) {
+      sessionValid = false;
+    }
+
+    return {
+      status: sessionValid ? 'healthy' : 'expired',
+      session_id: this.sid ? this.sid.substring(0, 12) + '...' : null,
+      initialized_at: this.initializedAt.toISOString(),
+      last_keepalive: this.lastKeepAlive.toISOString(),
+      uptime_minutes: Math.round(uptimeMs / 60000),
+      since_last_keepalive_seconds: Math.round(sinceLastKeepAlive / 1000),
+      cookie_source: this.cookieSource,
+      has_client_cookie: !!this.cookies.__client,
+      credits: creditsInfo,
+    };
+  }
+
+  /**
+   * Get the serialized cookie string from current in-memory cookies.
+   */
+  public getSerializedCookies(): string {
+    return Object.entries(this.cookies)
+      .filter(([, v]) => v !== undefined)
+      .map(([k, v]) => cookie.serialize(k, v as string))
+      .join('; ');
+  }
 }
 
-export const sunoApi = async (cookie?: string) => {
-  const resolvedCookie = cookie && cookie.includes('__client') ? cookie : process.env.SUNO_COOKIE; // Check for bad `Cookie` header (It's too expensive to actually parse the cookies *here*)
+/**
+ * Load persisted cookies from disk if available.
+ */
+async function loadPersistedCookie(): Promise<string | null> {
+  try {
+    const raw = await fs.readFile(COOKIE_PERSIST_PATH, 'utf-8');
+    const data = JSON.parse(raw);
+    if (data.cookies && data.cookies.__client) {
+      const serialized = Object.entries(data.cookies)
+        .filter(([, v]) => v !== undefined)
+        .map(([k, v]) => cookie.serialize(k, v as string))
+        .join('; ');
+      logger.info(`Loaded persisted cookies (saved ${data.updatedAt})`);
+      return serialized;
+    }
+  } catch {
+    // No persisted cookies — that's fine
+  }
+  return null;
+}
+
+export const sunoApi = async (cookieStr?: string) => {
+  // Determine cookie source: header > persisted > env
+  let resolvedCookie: string | undefined;
+  let source: 'header' | 'persisted' | 'env' = 'env';
+
+  if (cookieStr && cookieStr.includes('__client')) {
+    resolvedCookie = cookieStr;
+    source = 'header';
+  }
+
   if (!resolvedCookie) {
-    logger.info('No cookie provided! Aborting...\nPlease provide a cookie either in the .env file or in the Cookie header of your request.')
-    throw new Error('Please provide a cookie either in the .env file or in the Cookie header of your request.');
+    // Try persisted cookies first (survives Railway restarts)
+    const persisted = await loadPersistedCookie();
+    if (persisted) {
+      resolvedCookie = persisted;
+      source = 'persisted';
+    }
+  }
+
+  if (!resolvedCookie) {
+    resolvedCookie = process.env.SUNO_COOKIE;
+    source = 'env';
+  }
+
+  if (!resolvedCookie) {
+    logger.info('No cookie provided! Aborting...\nPlease provide a cookie either in the .env file, persisted file, or in the Cookie header of your request.');
+    throw new Error('No cookie available. Provide one via POST /api/update_cookie, the SUNO_COOKIE env var, or the X-Suno-Cookie header.');
   }
 
   // Check if the instance for this cookie already exists in the cache
@@ -757,8 +874,62 @@ export const sunoApi = async (cookie?: string) => {
 
   // If not, create a new instance and initialize it
   const instance = await new SunoApi(resolvedCookie).init();
+  instance.cookieSource = source;
+  instance.originalCookieKey = resolvedCookie;
   // Cache the initialized instance
   cache.set(resolvedCookie, instance);
 
+  // Persist on first init so cookies survive restarts
+  await instance.persistCookies();
+
   return instance;
+};
+
+/**
+ * Force-update the global cookie: clear cache, create new instance, persist.
+ */
+export const updateCookie = async (newCookie: string): Promise<object> => {
+  if (!newCookie || !newCookie.includes('__client')) {
+    throw new Error('Invalid cookie: must contain __client token');
+  }
+
+  // Clear ALL cached instances (a cookie update means the old ones are stale)
+  for (const [key, instance] of cache.entries()) {
+    cache.delete(key);
+  }
+
+  // Create and initialize a new instance
+  const instance = await new SunoApi(newCookie).init();
+  instance.cookieSource = 'api_update';
+  instance.originalCookieKey = newCookie;
+
+  // Cache and persist
+  cache.set(newCookie, instance);
+  await instance.persistCookies();
+
+  // Return health status as confirmation
+  return instance.getHealthStatus();
+};
+
+/**
+ * Get health status from the current default instance (if any).
+ */
+export const getCookieHealth = async (): Promise<object> => {
+  // Find any active instance
+  if (cache.size > 0) {
+    const instance = cache.values().next().value;
+    if (instance) return instance.getHealthStatus();
+  }
+  // No instance — try to create one (will use persisted/env cookie)
+  try {
+    const instance = await sunoApi();
+    return instance.getHealthStatus();
+  } catch (err: any) {
+    return {
+      status: 'no_cookie',
+      error: err.message,
+      has_env_cookie: !!process.env.SUNO_COOKIE,
+      has_persisted_cookie: false,
+    };
+  }
 };
