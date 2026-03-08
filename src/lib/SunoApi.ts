@@ -609,24 +609,62 @@ class SunoApi {
   }
 
   /**
-   * Generate stems for a song.
-   * @param song_id The ID of the song to generate stems for.
-   * @returns A promise that resolves to an AudioInfo object representing the generated stems.
+   * Generate stems for a song using "All Detected Stems" (up to 12 stems, 50 credits).
+   * Uses POST /api/generate/v2-web/ with references array — the same endpoint Suno's
+   * web UI uses when clicking "Get Stems → All Detected Stems".
+   *
+   * @param song_id  The clip ID of the song to extract stems from.
+   * @param title    Optional song title (sent in the prompt field).
+   * @param mode     "twelve" = All Detected Stems (50 credits), "two" = Vocals + Instrumental (10 credits).
+   * @returns A promise that resolves to an array of stem clip info objects.
    */
-  public async generateStems(song_id: string): Promise<AudioInfo[]> {
+  public async generateStems(
+    song_id: string,
+    title?: string,
+    mode: 'twelve' | 'two' = 'twelve'
+  ): Promise<AudioInfo[]> {
     await this.keepAlive(false);
+
+    const payload: Record<string, any> = {
+      prompt: title ? { title, type: 'Custom' } : '',
+      references: [
+        {
+          type: 'GenStem',
+          clipId: song_id,
+          stemType: 'FX',
+          stemTypeGroup: mode === 'twelve' ? 'Twelve' : 'Two',
+          stemTask: mode === 'twelve' ? 'twelve' : 'two',
+        },
+      ],
+      token: await this.getCaptcha(),
+    };
+
+    logger.info('generateStems payload:\n' + JSON.stringify(payload, null, 2));
+
     const response = await this.client.post(
-      `${SunoApi.BASE_URL}/api/edit/stems/${song_id}`, {}
+      `${SunoApi.BASE_URL}/api/generate/v2-web/`,
+      payload,
+      { timeout: 15000 }
     );
 
-    console.log('generateStems response:\n', response?.data);
-    return response.data.clips.map((clip: any) => ({
+    if (response.status !== 200) {
+      throw new Error('generateStems error: ' + response.statusText);
+    }
+
+    console.log('generateStems response:\n', JSON.stringify(response?.data, null, 2));
+
+    // The response returns a clips array, same format as regular generation
+    const clips = response.data?.clips || [];
+    return clips.map((clip: any) => ({
       id: clip.id,
       status: clip.status,
       created_at: clip.created_at,
       title: clip.title,
-      stem_from_id: clip.metadata.stem_from_id,
-      duration: clip.metadata.duration
+      audio_url: clip.audio_url,
+      stem_from_id: clip.metadata?.stem_from_id,
+      duration: clip.metadata?.duration,
+      type: clip.metadata?.type,
+      tags: clip.metadata?.tags,
     }));
   }
 
