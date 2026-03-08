@@ -331,7 +331,9 @@ class SunoApi {
     logger.info('Looking for Song Description textarea');
     let textarea: Locator;
     const allTextareas = page.locator('textarea');
-    await allTextareas.first().waitFor({ timeout: 10000 });
+    // Wait for textareas to exist in DOM (not visibility — some are hidden in Simple mode)
+    await page.waitForSelector('textarea', { state: 'attached', timeout: 15000 });
+    await sleep(1, 1); // Let React finish rendering all textareas
     const count = await allTextareas.count();
     let found = false;
     for (let i = 0; i < count; i++) {
