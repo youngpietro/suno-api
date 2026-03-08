@@ -69,8 +69,9 @@ interface PersonaResponse {
 
 class SunoApi {
   private static BASE_URL: string = 'https://studio-api.prod.suno.com';
-  private static CLERK_BASE_URL: string = 'https://clerk.suno.com';
-  private static CLERK_VERSION = '5.15.0';
+  private static CLERK_BASE_URL: string = 'https://auth.suno.com';
+  private static CLERK_VERSION = '5.117.0';
+  private static CLERK_API_VERSION = '2025-11-10';
 
   private readonly client: AxiosInstance;
   private sid?: string;
@@ -152,7 +153,7 @@ class SunoApi {
   private async getAuthToken() {
     logger.info('Getting the session ID');
     // URL to get session ID
-    const getSessionUrl = `${SunoApi.CLERK_BASE_URL}/v1/client?_is_native=true&_clerk_js_version=${SunoApi.CLERK_VERSION}`;
+    const getSessionUrl = `${SunoApi.CLERK_BASE_URL}/v1/client?_is_native=true&_clerk_js_version=${SunoApi.CLERK_VERSION}&__clerk_api_version=${SunoApi.CLERK_API_VERSION}`;
     // Get session ID
     const sessionResponse = await this.client.get(getSessionUrl, {
       headers: { Authorization: this.cookies.__client }
@@ -175,7 +176,7 @@ class SunoApi {
       throw new Error('Session ID is not set. Cannot renew token.');
     }
     // URL to renew session token
-    const renewUrl = `${SunoApi.CLERK_BASE_URL}/v1/client/sessions/${this.sid}/tokens?_is_native=true&_clerk_js_version=${SunoApi.CLERK_VERSION}`;
+    const renewUrl = `${SunoApi.CLERK_BASE_URL}/v1/client/sessions/${this.sid}/tokens?_is_native=true&_clerk_js_version=${SunoApi.CLERK_VERSION}&__clerk_api_version=${SunoApi.CLERK_API_VERSION}`;
     // Renew session token
     logger.info('KeepAlive...\n');
     const renewResponse = await this.client.post(renewUrl, {}, {
@@ -326,11 +327,40 @@ class SunoApi {
       // await this.click(page, { x: 318, y: 13 });
     } catch(e) {}
 
-    const textarea = page.locator('.custom-textarea');
-    await this.click(textarea);
-    await textarea.pressSequentially('Lorem ipsum', { delay: 80 });
+    // Try placeholder-based selector first, then fall back to any visible textarea
+    let textarea: Locator;
+    try {
+      textarea = page.locator('textarea[placeholder*="Hip-hop"]');
+      await textarea.waitFor({ state: 'visible', timeout: 5000 });
+    } catch {
+      logger.info('Primary textarea selector failed, trying generic textarea fallback');
+      const allTextareas = page.locator('textarea');
+      const count = await allTextareas.count();
+      let found = false;
+      for (let i = 0; i < count; i++) {
+        const ta = allTextareas.nth(i);
+        if (await ta.isVisible()) {
+          textarea = ta;
+          found = true;
+          break;
+        }
+      }
+      if (!found) {
+        throw new Error('Could not find any visible textarea on Suno create page — UI may have changed');
+      }
+    }
+    await this.click(textarea!);
+    await textarea!.pressSequentially('Lorem ipsum', { delay: 80 });
 
-    const button = page.locator('button[aria-label="Create"]').locator('div.flex');
+    // Try updated aria-label, fall back to old one
+    let button: Locator;
+    try {
+      button = page.locator('button[aria-label="Create song"]');
+      await button.waitFor({ state: 'visible', timeout: 3000 });
+    } catch {
+      logger.info('Create song button not found, trying fallback selectors');
+      button = page.locator('button[aria-label="Create"]').locator('div.flex');
+    }
     this.click(button);
 
     const controller = new AbortController();
@@ -433,7 +463,7 @@ class SunoApi {
    */
   private async getTurnstile() {
     return this.client.post(
-      `https://clerk.suno.com/v1/client?__clerk_api_version=2021-02-05&_clerk_js_version=${SunoApi.CLERK_VERSION}&_method=PATCH`,
+      `${SunoApi.CLERK_BASE_URL}/v1/client?__clerk_api_version=${SunoApi.CLERK_API_VERSION}&_clerk_js_version=${SunoApi.CLERK_VERSION}&_method=PATCH`,
       { captcha_error: '300030,300030,300030' },
       { headers: { 'content-type': 'application/x-www-form-urlencoded' } });
   }
