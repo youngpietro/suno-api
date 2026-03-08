@@ -90,7 +90,7 @@ class SunoApi {
   public initializedAt: Date = new Date();
   public lastKeepAlive: Date = new Date();
   public cookieSource: 'header' | 'persisted' | 'env' | 'api_update' = 'env';
-  private originalCookieKey?: string; // cache key for clearing on update
+  public originalCookieKey?: string; // cache key for clearing on update
 
   constructor(cookies: string) {
     this.userAgent = new UserAgent(/Macintosh/).random().toString(); // Usually Mac systems get less amount of CAPTCHAs
