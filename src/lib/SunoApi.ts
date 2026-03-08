@@ -610,41 +610,33 @@ class SunoApi {
   }
 
   /**
-   * Generate stems for a song using "All Detected Stems" (up to 12 stems, 50 credits).
-   * Uses POST /api/generate/v2-web/ with references array — the same endpoint Suno's
-   * web UI uses when clicking "Get Stems → All Detected Stems".
+   * Extract stems from a song using Suno's dedicated stem extraction endpoint.
+   * Uses POST /api/edit/stems/{clip_id} — the actual endpoint Suno's web UI calls.
    *
    * @param song_id  The clip ID of the song to extract stems from.
-   * @param title    Optional song title (sent in the prompt field).
    * @param mode     "twelve" = All Detected Stems (50 credits), "two" = Vocals + Instrumental (10 credits).
-   * @returns A promise that resolves to an array of stem clip info objects.
+   * @returns A promise that resolves to the stem extraction response.
    */
   public async generateStems(
     song_id: string,
     title?: string,
     mode: 'twelve' | 'two' = 'twelve'
-  ): Promise<AudioInfo[]> {
+  ): Promise<any> {
     await this.keepAlive(false);
 
-    const payload: Record<string, any> = {
-      prompt: title || '',
-      mv: DEFAULT_MODEL,
-      generation_type: 'TEXT',
-      references: [
-        {
-          type: 'gen_stem',
-          clip_id: song_id,
-          stem_type: 'fx',
-          stem_type_group: mode === 'twelve' ? 'twelve' : 'two',
-          stem_task: mode === 'twelve' ? 'twelve' : 'two',
-        },
-      ],
-    };
+    // The correct Suno endpoint for stem extraction:
+    // POST /api/edit/stems/{clip_id}
+    // Body: { stem_task: "twelve" } for 12-stem extraction (50 credits)
+    //        {} or { stem_task: "two" } for 2-stem vocal/instrumental (10 credits)
+    const payload: Record<string, any> = {};
+    if (mode === 'twelve') {
+      payload.stem_task = 'twelve';
+    }
 
-    logger.info('generateStems payload:\n' + JSON.stringify(payload, null, 2));
+    logger.info(`generateStems: POST /api/edit/stems/${song_id} mode=${mode} payload=${JSON.stringify(payload)}`);
 
     const response = await this.client.post(
-      `${SunoApi.BASE_URL}/api/generate/v2-web/`,
+      `${SunoApi.BASE_URL}/api/edit/stems/${song_id}`,
       payload,
       { timeout: 15000 }
     );
@@ -653,21 +645,11 @@ class SunoApi {
       throw new Error('generateStems error: ' + response.statusText);
     }
 
-    console.log('generateStems response:\n', JSON.stringify(response?.data, null, 2));
+    logger.info('generateStems response:\n' + JSON.stringify(response?.data, null, 2));
 
-    // The response returns a clips array, same format as regular generation
-    const clips = response.data?.clips || [];
-    return clips.map((clip: any) => ({
-      id: clip.id,
-      status: clip.status,
-      created_at: clip.created_at,
-      title: clip.title,
-      audio_url: clip.audio_url,
-      stem_from_id: clip.metadata?.stem_from_id,
-      duration: clip.metadata?.duration,
-      type: clip.metadata?.type,
-      tags: clip.metadata?.tags,
-    }));
+    // The response format from /api/edit/stems/ may differ from v2-web.
+    // Return the raw response data for flexibility.
+    return response.data;
   }
 
 
