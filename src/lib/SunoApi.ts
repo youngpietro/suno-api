@@ -327,39 +327,64 @@ class SunoApi {
       // await this.click(page, { x: 318, y: 13 });
     } catch(e) {}
 
-    // Try placeholder-based selector first, then fall back to any visible textarea
+    // Find the first visible textarea on the Suno create page (Song Description in Simple mode)
+    logger.info('Looking for Song Description textarea');
     let textarea: Locator;
-    try {
-      textarea = page.locator('textarea[placeholder*="Hip-hop"]');
-      await textarea.waitFor({ state: 'visible', timeout: 5000 });
-    } catch {
-      logger.info('Primary textarea selector failed, trying generic textarea fallback');
-      const allTextareas = page.locator('textarea');
-      const count = await allTextareas.count();
-      let found = false;
-      for (let i = 0; i < count; i++) {
-        const ta = allTextareas.nth(i);
-        if (await ta.isVisible()) {
-          textarea = ta;
-          found = true;
-          break;
-        }
-      }
-      if (!found) {
-        throw new Error('Could not find any visible textarea on Suno create page — UI may have changed');
+    const allTextareas = page.locator('textarea');
+    await allTextareas.first().waitFor({ timeout: 10000 });
+    const count = await allTextareas.count();
+    let found = false;
+    for (let i = 0; i < count; i++) {
+      const ta = allTextareas.nth(i);
+      if (await ta.isVisible()) {
+        textarea = ta;
+        found = true;
+        logger.info(`Found visible textarea at index ${i}`);
+        break;
       }
     }
-    await this.click(textarea!);
-    await textarea!.pressSequentially('Lorem ipsum', { delay: 80 });
+    if (!found) {
+      throw new Error('Could not find any visible textarea on Suno create page — UI may have changed');
+    }
 
-    // Try updated aria-label, fall back to old one
-    let button: Locator;
+    // Click and type into the textarea, then trigger React state update via native events
+    await this.click(textarea!);
+    await textarea!.pressSequentially('Lorem ipsum dolor sit', { delay: 60 });
+    // Force React to recognize the input by dispatching native events
+    await textarea!.evaluate((el: HTMLTextAreaElement) => {
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    await sleep(1, 1); // Wait for React re-render
+
+    // Wait for Create button to become enabled (React needs to process the input)
+    const button = page.locator('button[aria-label="Create song"]');
     try {
-      button = page.locator('button[aria-label="Create song"]');
-      await button.waitFor({ state: 'visible', timeout: 3000 });
+      await button.waitFor({ state: 'visible', timeout: 5000 });
+      // Wait until the button is no longer disabled
+      await page.waitForFunction(
+        (selector: string) => {
+          const btn = document.querySelector(selector) as HTMLButtonElement;
+          return btn && !btn.disabled;
+        },
+        'button[aria-label="Create song"]',
+        { timeout: 5000 }
+      );
+      logger.info('Create song button is enabled, clicking');
     } catch {
-      logger.info('Create song button not found, trying fallback selectors');
-      button = page.locator('button[aria-label="Create"]').locator('div.flex');
+      // If button is still disabled, try using page.fill() as alternative React trigger
+      logger.info('Create button still disabled, trying page.fill() to trigger React state');
+      await textarea!.evaluate((el: HTMLTextAreaElement) => {
+        const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
+          window.HTMLTextAreaElement.prototype, 'value'
+        )?.set;
+        if (nativeInputValueSetter) {
+          nativeInputValueSetter.call(el, 'Lorem ipsum dolor sit amet');
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+          el.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+      });
+      await sleep(1, 2);
     }
     this.click(button);
 
