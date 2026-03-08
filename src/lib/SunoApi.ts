@@ -37,6 +37,7 @@ export interface AudioInfo {
   negative_tags?: string; // Negative tags of music.
   duration?: string; // Duration of the audio
   error_message?: string; // Error message if any
+  metadata?: Record<string, any>; // Raw metadata from Suno (includes stem_from_id, has_stem, etc.)
 }
 
 interface PersonaResponse {
@@ -751,7 +752,8 @@ class SunoApi {
       type: audio.metadata.type,
       tags: audio.metadata.tags,
       duration: audio.metadata.duration,
-      error_message: audio.metadata.error_message
+      error_message: audio.metadata.error_message,
+      metadata: audio.metadata // Raw metadata — includes stem_from_id, has_stem, stem_type_group_name, etc.
     }));
   }
 
@@ -766,6 +768,104 @@ class SunoApi {
       `${SunoApi.BASE_URL}/api/clip/${clipId}`
     );
     return response.data;
+  }
+
+  /**
+   * Find all stem clips for a given parent clip ID.
+   * Scans the user's library feed for clips whose metadata.stem_from_id matches parentId.
+   * Also returns the parent clip's stem status via /api/clip.
+   *
+   * @param parentId The clip ID of the parent (original) song.
+   * @param maxPages Maximum number of library feed pages to scan (default: 5 = 100 clips).
+   * @returns An object with parent info and an array of stem clips with full metadata.
+   */
+  public async findStems(parentId: string, maxPages: number = 5): Promise<{
+    parent: { id: string; has_stem: boolean; title?: string };
+    stems: Array<{
+      id: string;
+      title: string;
+      status: string;
+      audio_url: string;
+      stem_type: string;
+      stem_from_id: string;
+      stem_task: string;
+      created_at: string;
+      duration: number;
+      metadata: Record<string, any>;
+    }>;
+  }> {
+    await this.keepAlive(false);
+
+    // 1. Get parent clip info via /api/clip (returns full metadata)
+    let parentInfo: any;
+    try {
+      parentInfo = await this.getClip(parentId);
+    } catch (err) {
+      throw new Error(`Parent clip ${parentId} not found`);
+    }
+
+    const hasStem = parentInfo?.metadata?.has_stem === true;
+    const parentTitle = parentInfo?.title || '';
+
+    if (!hasStem) {
+      return {
+        parent: { id: parentId, has_stem: false, title: parentTitle },
+        stems: []
+      };
+    }
+
+    // 2. Scan library feed pages for clips with metadata.stem_from_id === parentId
+    const stems: any[] = [];
+    for (let page = 0; page < maxPages; page++) {
+      const url = new URL(`${SunoApi.BASE_URL}/api/feed/v2`);
+      url.searchParams.append('page', page.toString());
+
+      const response = await this.client.get(url.href, { timeout: 10000 });
+      const clips = response.data?.clips || [];
+
+      if (clips.length === 0) break; // No more clips
+
+      for (const clip of clips) {
+        if (clip.metadata?.stem_from_id === parentId) {
+          // Determine stem type from metadata or title
+          let stemType = clip.metadata?.stem_type_group_name?.toLowerCase() || '';
+          if (!stemType) {
+            // Fallback: parse from title pattern "Title (StemType)"
+            const parenMatch = clip.title?.match(/\(([^)]+)\)\s*$/);
+            if (parenMatch) {
+              stemType = parenMatch[1].trim().toLowerCase();
+            } else {
+              // Fallback: "Title - StemType"
+              const dashMatch = clip.title?.match(/\s*-\s*([^-]+)$/);
+              if (dashMatch) stemType = dashMatch[1].trim().toLowerCase();
+            }
+          }
+
+          stems.push({
+            id: clip.id,
+            title: clip.title,
+            status: clip.status,
+            audio_url: clip.audio_url || `https://cdn1.suno.ai/${clip.id}.mp3`,
+            stem_type: stemType,
+            stem_from_id: clip.metadata.stem_from_id,
+            stem_task: clip.metadata.stem_task || '',
+            created_at: clip.created_at,
+            duration: clip.metadata.duration || 0,
+            metadata: clip.metadata
+          });
+        }
+      }
+
+      // If we found stems and have scanned enough pages, stop early
+      // (12-stem mode produces max 12, 2-stem mode produces 2)
+      if (stems.length >= 12) break;
+    }
+
+    logger.info(`findStems: Found ${stems.length} stems for parent ${parentId}`);
+    return {
+      parent: { id: parentId, has_stem: hasStem, title: parentTitle },
+      stems
+    };
   }
 
   public async get_credits(): Promise<object> {
