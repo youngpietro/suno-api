@@ -111,10 +111,16 @@ class SunoApi {
     this.client.interceptors.request.use(config => {
       if (this.currentToken && !config.headers.Authorization)
         config.headers.Authorization = `Bearer ${this.currentToken}`;
-      const cookiesArray = Object.entries(this.cookies).map(([key, value]) => 
-        cookie.serialize(key, value as string)
-      );
-      config.headers.Cookie = cookiesArray.join('; ');
+      // Only send cookies to Clerk auth endpoints, NOT to Suno's API
+      // Sending stale cookies to studio-api.prod.suno.com causes "Token validation failed"
+      const url = config.url || '';
+      const isClerkRequest = url.includes('auth.suno.com') || url.includes('/v1/client');
+      if (isClerkRequest) {
+        const cookiesArray = Object.entries(this.cookies).map(([key, value]) =>
+          cookie.serialize(key, value as string)
+        );
+        config.headers.Cookie = cookiesArray.join('; ');
+      }
       return config;
     });
     this.client.interceptors.response.use(resp => {
