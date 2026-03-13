@@ -102,11 +102,9 @@ class SunoApi {
       headers: {
         'Affiliate-Id': 'undefined',
         'Device-Id': `"${this.deviceId}"`,
-        'x-suno-client': 'Android prerelease-4nt180t 1.0.42',
-        'X-Requested-With': 'com.suno.android',
-        'sec-ch-ua': '"Chromium";v="130", "Android WebView";v="130", "Not?A_Brand";v="99"',
-        'sec-ch-ua-mobile': '?1',
-        'sec-ch-ua-platform': '"Android"',
+        'sec-ch-ua': '"Chromium";v="134", "Not:A-Brand";v="24", "Google Chrome";v="134"',
+        'sec-ch-ua-mobile': '?0',
+        'sec-ch-ua-platform': '"macOS"',
         'User-Agent': this.userAgent
       }
     });
