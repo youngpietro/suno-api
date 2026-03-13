@@ -471,6 +471,7 @@ class SunoApi {
     continue_at?: number
   ): Promise<AudioInfo[]> {
     await this.keepAlive();
+    const captchaToken = await this.getCaptcha();
     const payload: any = {
       make_instrumental: make_instrumental,
       mv: model || DEFAULT_MODEL,
@@ -479,8 +480,12 @@ class SunoApi {
       continue_at: continue_at,
       continue_clip_id: continue_clip_id,
       task: task,
-      token: await this.getCaptcha()
     };
+    // Only include token field if we actually have a CAPTCHA token
+    // Sending token: null causes Suno to reject with "Token validation failed"
+    if (captchaToken) {
+      payload.token = captchaToken;
+    }
     if (isCustom) {
       payload.tags = tags;
       payload.title = title;
