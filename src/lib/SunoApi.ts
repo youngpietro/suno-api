@@ -87,6 +87,11 @@ class SunoApi {
   private ghostCursorEnabled = yn(process.env.BROWSER_GHOST_CURSOR, { default: false });
   private cursor?: Cursor;
 
+  // CAPTCHA token caching
+  private cachedCaptchaToken?: string;
+  private captchaTokenTimestamp?: number;
+  private static readonly CAPTCHA_TOKEN_TTL = 15 * 60 * 1000; // 15 minutes
+
   // Cookie health tracking
   public initializedAt: Date = new Date();
   public lastKeepAlive: Date = new Date();
@@ -106,16 +111,10 @@ class SunoApi {
     this.client.interceptors.request.use(config => {
       if (this.currentToken && !config.headers.Authorization)
         config.headers.Authorization = `Bearer ${this.currentToken}`;
-      // Only send cookies to Clerk auth endpoints, NOT to Suno's API
-      // Sending stale cookies to studio-api.prod.suno.com causes "Token validation failed"
-      const url = config.url || '';
-      const isClerkRequest = url.includes('auth.suno.com') || url.includes('/v1/client');
-      if (isClerkRequest) {
-        const cookiesArray = Object.entries(this.cookies).map(([key, value]) =>
-          cookie.serialize(key, value as string)
-        );
-        config.headers.Cookie = cookiesArray.join('; ');
-      }
+      const cookiesArray = Object.entries(this.cookies).map(([key, value]) =>
+        cookie.serialize(key, value as string)
+      );
+      config.headers.Cookie = cookiesArray.join('; ');
       return config;
     });
     this.client.interceptors.response.use(resp => {
@@ -324,20 +323,139 @@ class SunoApi {
    * @returns {string|null} hCaptcha token. If no verification is required, returns null
    */
   public async getCaptcha(): Promise<string|null> {
-    const required = await this.captchaRequired();
-    if (!required)
+    if (!await this.captchaRequired())
       return null;
 
-    // Suno reports CAPTCHA required, but try without token first.
-    // As of March 2026, Suno may not enforce CAPTCHA on all requests,
-    // and their hCaptcha integration appears to have been removed/changed.
-    logger.info('CAPTCHA reported as required — will attempt generation without token first');
-    return null;
+    // Return cached token if still valid
+    if (this.cachedCaptchaToken && this.captchaTokenTimestamp &&
+        Date.now() - this.captchaTokenTimestamp < SunoApi.CAPTCHA_TOKEN_TTL) {
+      logger.info('Using cached CAPTCHA token (age: ' + Math.round((Date.now() - this.captchaTokenTimestamp) / 1000) + 's)');
+      return this.cachedCaptchaToken;
+    }
 
-    // NOTE: Browser-based CAPTCHA solving code has been removed because Suno
-    // no longer shows hCaptcha after clicking Create (as of March 2026).
-    // The code is preserved in git history (commit 086cccc and earlier) for
-    // when/if CAPTCHA solving needs to be re-enabled with updated selectors.
+    if (!process.env.TWOCAPTCHA_KEY) {
+      logger.warn('CAPTCHA required but TWOCAPTCHA_KEY not set — generation will likely fail');
+      return null;
+    }
+
+    logger.info('CAPTCHA required. Launching browser...');
+    const browser = await this.launchBrowser();
+    const page = await browser.newPage();
+    await page.goto('https://suno.com/create', { referer: 'https://www.google.com/', waitUntil: 'domcontentloaded', timeout: 0 });
+
+    logger.info('Waiting for Suno interface to load');
+    await page.waitForResponse('**/api/project/**\\?**', { timeout: 60000 });
+
+    if (this.ghostCursorEnabled)
+      this.cursor = await createCursor(page);
+
+    logger.info('Triggering the CAPTCHA');
+    try {
+      await page.getByLabel('Close').click({ timeout: 2000 });
+    } catch(e) {}
+
+    const textarea = page.locator('.custom-textarea');
+    await this.click(textarea);
+    await textarea.pressSequentially('Lorem ipsum', { delay: 80 });
+
+    const button = page.locator('button[aria-label="Create"]').locator('div.flex');
+    this.click(button);
+
+    const controller = new AbortController();
+    new Promise<void>(async (resolve, reject) => {
+      const frame = page.frameLocator('iframe[title*="hCaptcha"]');
+      const challenge = frame.locator('.challenge-container');
+      try {
+        let wait = true;
+        while (true) {
+          if (wait)
+            await waitForRequests(page, controller.signal);
+          const drag = (await challenge.locator('.prompt-text').first().innerText()).toLowerCase().includes('drag');
+          let captcha: any;
+          for (let j = 0; j < 3; j++) {
+            try {
+              logger.info('Sending the CAPTCHA to 2Captcha');
+              const payload: paramsCoordinates = {
+                body: (await challenge.screenshot({ timeout: 5000 })).toString('base64'),
+                lang: process.env.BROWSER_LOCALE
+              };
+              if (drag) {
+                payload.textinstructions = 'CLICK on the shapes at their edge or center as shown above—please be precise!';
+                payload.imginstructions = (await fs.readFile(path.join(process.cwd(), 'public', 'drag-instructions.jpg'))).toString('base64');
+              }
+              captcha = await this.solver.coordinates(payload);
+              break;
+            } catch(err: any) {
+              logger.info(err.message);
+              if (j != 2)
+                logger.info('Retrying...');
+              else
+                throw err;
+            }
+          }
+          if (drag) {
+            const challengeBox = await challenge.boundingBox();
+            if (challengeBox == null)
+              throw new Error('.challenge-container boundingBox is null!');
+            if (captcha.data.length % 2) {
+              logger.info('Solution does not have even amount of points required for dragging. Requesting new solution...');
+              this.solver.badReport(captcha.id);
+              wait = false;
+              continue;
+            }
+            for (let i = 0; i < captcha.data.length; i += 2) {
+              const data1 = captcha.data[i];
+              const data2 = captcha.data[i+1];
+              logger.info(JSON.stringify(data1) + JSON.stringify(data2));
+              await page.mouse.move(challengeBox.x + +data1.x, challengeBox.y + +data1.y);
+              await page.mouse.down();
+              await sleep(1.1);
+              await page.mouse.move(challengeBox.x + +data2.x, challengeBox.y + +data2.y, { steps: 30 });
+              await page.mouse.up();
+            }
+            wait = true;
+          } else {
+            for (const data of captcha.data) {
+              logger.info(data);
+              await this.click(challenge, { x: +data.x, y: +data.y });
+            }
+          }
+          this.click(frame.locator('.button-submit')).catch(e => {
+            if (e.message.includes('viewport'))
+              this.click(button);
+            else
+              throw e;
+          });
+        }
+      } catch(e: any) {
+        if (e.message.includes('been closed') || e.message == 'AbortError')
+          resolve();
+        else
+          reject(e);
+      }
+    }).catch(e => {
+      browser.browser()?.close();
+      throw e;
+    });
+    return (new Promise<string|null>((resolve, reject) => {
+      page.route('**/api/generate/v2/**', async (route: any) => {
+        try {
+          logger.info('hCaptcha token received. Closing browser');
+          route.abort();
+          browser.browser()?.close();
+          controller.abort();
+          const request = route.request();
+          this.currentToken = request.headers().authorization.split('Bearer ').pop();
+          const token = request.postDataJSON().token;
+          // Cache the token
+          this.cachedCaptchaToken = token;
+          this.captchaTokenTimestamp = Date.now();
+          resolve(token);
+        } catch(err) {
+          reject(err);
+        }
+      });
+    }));
   }
 
   /**
@@ -470,11 +588,14 @@ class SunoApi {
     continue_at?: number
   ): Promise<AudioInfo[]> {
     await this.keepAlive();
+    const captchaToken = await this.getCaptcha();
     const payload: any = {
       make_instrumental: make_instrumental,
       mv: model || DEFAULT_MODEL,
       prompt: '',
+      generation_type: 'TEXT',
     };
+    if (captchaToken) payload.token = captchaToken;
     if (continue_at !== undefined) payload.continue_at = continue_at;
     if (continue_clip_id) payload.continue_clip_id = continue_clip_id;
     if (task) payload.task = task;
@@ -932,6 +1053,38 @@ class SunoApi {
       .filter(([, v]) => v !== undefined)
       .map(([k, v]) => cookie.serialize(k, v as string))
       .join('; ');
+  }
+
+  /**
+   * Force-refresh the CAPTCHA token (clears cache, solves fresh).
+   * Returns the token or null if CAPTCHA is not required.
+   */
+  public async refreshCaptchaToken(): Promise<{ token: string | null; cached: boolean; captcha_required: boolean }> {
+    const required = await this.captchaRequired();
+    if (!required) {
+      return { token: null, cached: false, captcha_required: false };
+    }
+    // Clear cached token so getCaptcha() will solve fresh
+    this.cachedCaptchaToken = undefined;
+    this.captchaTokenTimestamp = undefined;
+    const token = await this.getCaptcha();
+    return { token, cached: false, captcha_required: true };
+  }
+
+  /**
+   * Get CAPTCHA status info.
+   */
+  public getCaptchaStatus(): object {
+    const hasCached = !!(this.cachedCaptchaToken && this.captchaTokenTimestamp);
+    const tokenAge = hasCached ? Math.round((Date.now() - this.captchaTokenTimestamp!) / 1000) : null;
+    const tokenValid = hasCached && (Date.now() - this.captchaTokenTimestamp! < SunoApi.CAPTCHA_TOKEN_TTL);
+    return {
+      has_cached_token: hasCached,
+      token_age_seconds: tokenAge,
+      token_valid: tokenValid,
+      ttl_seconds: SunoApi.CAPTCHA_TOKEN_TTL / 1000,
+      twocaptcha_configured: !!process.env.TWOCAPTCHA_KEY,
+    };
   }
 }
 

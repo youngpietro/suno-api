@@ -3,6 +3,7 @@ import { cookies } from 'next/headers'
 import { DEFAULT_MODEL, sunoApi } from "@/lib/SunoApi";
 import { corsHeaders } from "@/lib/utils";
 
+export const maxDuration = 600; // allow longer timeout for CAPTCHA solving + wait_audio
 export const dynamic = "force-dynamic";
 
 export async function POST(req: NextRequest) {
@@ -10,8 +11,8 @@ export async function POST(req: NextRequest) {
     try {
       const body = await req.json();
       const { prompt, make_instrumental, model, wait_audio } = body;
-
-      const audioInfo = await (await sunoApi((await cookies()).toString())).generate(
+      const resolvedCookie = req.headers.get('x-suno-cookie') || (await cookies()).toString();
+      const audioInfo = await (await sunoApi(resolvedCookie)).generate(
         prompt,
         Boolean(make_instrumental),
         model || DEFAULT_MODEL,
