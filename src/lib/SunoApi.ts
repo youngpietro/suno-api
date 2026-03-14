@@ -349,8 +349,20 @@ class SunoApi {
       await page.getByLabel('Close').click({ timeout: 2000 });
     } catch(e) {}
 
-    const textarea = page.locator('textarea').first();
-    await textarea.waitFor({ state: 'visible', timeout: 60000 });
+    // Switch to Advanced mode so the lyrics textarea is visible
+    try {
+      const advancedTab = page.locator('button:has-text("Advanced")').first();
+      await advancedTab.waitFor({ state: 'visible', timeout: 5000 });
+      await advancedTab.click();
+      logger.info('Switched to Advanced mode');
+      await sleep(1);
+    } catch(e) {
+      logger.info('Could not find Advanced tab, proceeding with current mode');
+    }
+
+    // Use the lyrics textarea (visible in Advanced mode) or fall back to any visible textarea
+    const textarea = page.locator('textarea:visible').first();
+    await textarea.waitFor({ state: 'visible', timeout: 30000 });
     await this.click(textarea);
     await textarea.pressSequentially('Lorem ipsum', { delay: 80 });
 
