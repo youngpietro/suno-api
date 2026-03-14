@@ -349,11 +349,13 @@ class SunoApi {
       await page.getByLabel('Close').click({ timeout: 2000 });
     } catch(e) {}
 
-    const textarea = page.locator('.custom-textarea');
+    const textarea = page.locator('textarea').first();
+    await textarea.waitFor({ state: 'visible', timeout: 60000 });
     await this.click(textarea);
     await textarea.pressSequentially('Lorem ipsum', { delay: 80 });
 
-    const button = page.locator('button[aria-label="Create"]').locator('div.flex');
+    const button = page.locator('button[aria-label="Create song"], button[aria-label="Create"]').first();
+    await button.waitFor({ state: 'visible', timeout: 10000 });
     this.click(button);
 
     const controller = new AbortController();
