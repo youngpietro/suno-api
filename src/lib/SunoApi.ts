@@ -333,7 +333,7 @@ class SunoApi {
     if (!await this.captchaRequired())
       return null;
 
-    logger.info('CAPTCHA required. Launching browser...')
+    logger.info('CAPTCHA required. Launching browser to solve invisible hCaptcha...');
     const browser = await this.launchBrowser();
     const page = await browser.newPage();
     await page.goto('https://suno.com/create', { referer: 'https://www.google.com/', waitUntil: 'domcontentloaded', timeout: 0 });
@@ -341,127 +341,32 @@ class SunoApi {
     logger.info('Waiting for Suno interface to load');
     await page.waitForResponse('**/api/project/**\\?**', { timeout: 60000 });
 
-    if (this.ghostCursorEnabled)
-      this.cursor = await createCursor(page);
+    // Wait for hCaptcha invisible widget to be ready
+    logger.info('Waiting for hCaptcha to initialize...');
+    await page.waitForFunction(() => typeof (window as any).hcaptcha?.execute === 'function', { timeout: 30000 });
 
-    logger.info('Triggering the CAPTCHA');
+    // Execute invisible hCaptcha — returns token without visual challenge
+    logger.info('Executing invisible hCaptcha...');
     try {
-      await page.getByLabel('Close').click({ timeout: 2000 });
-    } catch(e) {}
-
-    // Switch to Advanced mode so the lyrics textarea is visible
-    try {
-      const advancedTab = page.locator('button:has-text("Advanced")').first();
-      await advancedTab.waitFor({ state: 'visible', timeout: 5000 });
-      await advancedTab.click();
-      logger.info('Switched to Advanced mode');
-      await sleep(1);
-    } catch(e) {
-      logger.info('Could not find Advanced tab, proceeding with current mode');
-    }
-
-    // Use the lyrics textarea (visible in Advanced mode) or fall back to any visible textarea
-    const textarea = page.locator('textarea:visible').first();
-    await textarea.waitFor({ state: 'visible', timeout: 30000 });
-    await this.click(textarea);
-    await textarea.pressSequentially('Lorem ipsum', { delay: 80 });
-
-    const button = page.locator('button[aria-label="Create song"], button[aria-label="Create"]').first();
-    await button.waitFor({ state: 'visible', timeout: 10000 });
-    this.click(button);
-
-    const controller = new AbortController();
-    new Promise<void>(async (resolve, reject) => {
-      const frame = page.frameLocator('iframe[title*="hCaptcha"]');
-      const challenge = frame.locator('.challenge-container');
-      try {
-        let wait = true;
-        while (true) {
-          if (wait)
-            await waitForRequests(page, controller.signal);
-          const drag = (await challenge.locator('.prompt-text').first().innerText()).toLowerCase().includes('drag');
-          let captcha: any;
-          for (let j = 0; j < 3; j++) {
-            try {
-              logger.info('Sending the CAPTCHA to 2Captcha');
-              const payload: paramsCoordinates = {
-                body: (await challenge.screenshot({ timeout: 5000 })).toString('base64'),
-                lang: process.env.BROWSER_LOCALE
-              };
-              if (drag) {
-                payload.textinstructions = 'CLICK on the shapes at their edge or center as shown above—please be precise!';
-                payload.imginstructions = (await fs.readFile(path.join(process.cwd(), 'public', 'drag-instructions.jpg'))).toString('base64');
-              }
-              captcha = await this.solver.coordinates(payload);
-              break;
-            } catch(err: any) {
-              logger.info(err.message);
-              if (j != 2)
-                logger.info('Retrying...');
-              else
-                throw err;
-            }
-          }
-          if (drag) {
-            const challengeBox = await challenge.boundingBox();
-            if (challengeBox == null)
-              throw new Error('.challenge-container boundingBox is null!');
-            if (captcha.data.length % 2) {
-              logger.info('Solution does not have even amount of points required for dragging. Requesting new solution...');
-              this.solver.badReport(captcha.id);
-              wait = false;
-              continue;
-            }
-            for (let i = 0; i < captcha.data.length; i += 2) {
-              const data1 = captcha.data[i];
-              const data2 = captcha.data[i+1];
-              logger.info(JSON.stringify(data1) + JSON.stringify(data2));
-              await page.mouse.move(challengeBox.x + +data1.x, challengeBox.y + +data1.y);
-              await page.mouse.down();
-              await sleep(1.1);
-              await page.mouse.move(challengeBox.x + +data2.x, challengeBox.y + +data2.y, { steps: 30 });
-              await page.mouse.up();
-            }
-            wait = true;
-          } else {
-            for (const data of captcha.data) {
-              logger.info(data);
-              await this.click(challenge, { x: +data.x, y: +data.y });
-            };
-          }
-          this.click(frame.locator('.button-submit')).catch(e => {
-            if (e.message.includes('viewport'))
-              this.click(button);
-            else
-              throw e;
-          });
-        }
-      } catch(e: any) {
-        if (e.message.includes('been closed')
-          || e.message == 'AbortError')
-          resolve();
-        else
-          reject(e);
-      }
-    }).catch(e => {
-      browser.browser()?.close();
-      throw e;
-    });
-    return (new Promise((resolve, reject) => {
-      page.route('**/api/generate/v2/**', async (route: any) => {
-        try {
-          logger.info('hCaptcha token received. Closing browser');
-          route.abort();
-          browser.browser()?.close();
-          controller.abort();
-          const request = route.request();
-          this.currentToken = request.headers().authorization.split('Bearer ').pop();
-          resolve(request.postDataJSON().token);
-        } catch(err) {
-          reject(err);
-        }
+      const token = await page.evaluate(async () => {
+        const result = await (window as any).hcaptcha.execute({ async: true });
+        return result?.response || null;
       });
-    }));
+
+      if (token) {
+        logger.info(`hCaptcha token obtained (${token.length} chars). Closing browser.`);
+        await browser.browser()?.close();
+        return token;
+      } else {
+        logger.warn('hcaptcha.execute() returned no token');
+        await browser.browser()?.close();
+        return null;
+      }
+    } catch (err: any) {
+      logger.error('hCaptcha execution failed: ' + err.message);
+      await browser.browser()?.close();
+      throw err;
+    }
   }
 
   /**
