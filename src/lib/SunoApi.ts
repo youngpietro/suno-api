@@ -105,17 +105,19 @@ class SunoApi {
     this.client = axios.create({
       withCredentials: true,
       headers: {
+        'Affiliate-Id': 'undefined',
+        'Device-Id': `"${this.deviceId}"`,
+        'x-suno-client': 'Android prerelease-4nt180t 1.0.42',
+        'X-Requested-With': 'com.suno.android',
+        'sec-ch-ua': '"Chromium";v="130", "Android WebView";v="130", "Not?A_Brand";v="99"',
+        'sec-ch-ua-mobile': '?1',
+        'sec-ch-ua-platform': '"Android"',
         'User-Agent': this.userAgent
       }
     });
     this.client.interceptors.request.use(config => {
       if (this.currentToken && !config.headers.Authorization)
         config.headers.Authorization = `Bearer ${this.currentToken}`;
-      // Device-Id and Browser-Token are required by Suno's v2-web endpoint
-      config.headers['Device-Id'] = this.deviceId;
-      config.headers['Browser-Token'] = JSON.stringify({
-        token: Buffer.from(JSON.stringify({ timestamp: Date.now() })).toString('base64')
-      });
       const cookiesArray = Object.entries(this.cookies).map(([key, value]) =>
         cookie.serialize(key, value as string)
       );
@@ -174,7 +176,7 @@ class SunoApi {
   private async getAuthToken() {
     logger.info('Getting the session ID');
     // URL to get session ID
-    const getSessionUrl = `${SunoApi.CLERK_BASE_URL}/v1/client?_is_native=true&_clerk_js_version=${SunoApi.CLERK_VERSION}&__clerk_api_version=${SunoApi.CLERK_API_VERSION}`;
+    const getSessionUrl = `${SunoApi.CLERK_BASE_URL}/v1/client?__clerk_api_version=${SunoApi.CLERK_API_VERSION}&_clerk_js_version=${SunoApi.CLERK_VERSION}`;
     // Get session ID
     const sessionResponse = await this.client.get(getSessionUrl, {
       headers: { Authorization: this.cookies.__client }
@@ -197,7 +199,7 @@ class SunoApi {
       throw new Error('Session ID is not set. Cannot renew token.');
     }
     // URL to renew session token
-    const renewUrl = `${SunoApi.CLERK_BASE_URL}/v1/client/sessions/${this.sid}/tokens?_is_native=true&_clerk_js_version=${SunoApi.CLERK_VERSION}&__clerk_api_version=${SunoApi.CLERK_API_VERSION}`;
+    const renewUrl = `${SunoApi.CLERK_BASE_URL}/v1/client/sessions/${this.sid}/tokens?__clerk_api_version=${SunoApi.CLERK_API_VERSION}&_clerk_js_version=${SunoApi.CLERK_VERSION}`;
     // Renew session token
     logger.info('KeepAlive...\n');
     const renewResponse = await this.client.post(renewUrl, {}, {
