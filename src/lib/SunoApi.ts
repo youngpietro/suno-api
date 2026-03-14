@@ -330,12 +330,15 @@ class SunoApi {
    * @returns {string|null} hCaptcha token. If no verification is required, returns null
    */
   public async getCaptcha(): Promise<string|null> {
-    // The "Token validation failed" error was caused by missing Device-Id and
-    // Browser-Token headers, NOT by hCaptcha. These headers are now added in
-    // the request interceptor. No CAPTCHA solving is needed.
-    const required = await this.captchaRequired();
-    if (required) {
-      logger.info('Suno /api/c/check reports CAPTCHA required — Browser-Token header should handle this');
+    try {
+      const required = await this.captchaRequired();
+      if (!required) {
+        logger.info('CAPTCHA not required');
+        return null;
+      }
+      logger.warn('CAPTCHA required but no solver configured — generation may fail');
+    } catch (err: any) {
+      logger.info('Could not check CAPTCHA requirement: ' + err.message);
     }
     return null;
   }
@@ -470,16 +473,17 @@ class SunoApi {
     continue_at?: number
   ): Promise<AudioInfo[]> {
     await this.keepAlive();
+    // Match upstream payload structure (Android client format)
     const payload: any = {
-      token: null,
-      generation_type: 'TEXT',
       make_instrumental: make_instrumental,
       mv: model || DEFAULT_MODEL,
       prompt: '',
+      generation_type: 'TEXT',
+      continue_at: continue_at,
+      continue_clip_id: continue_clip_id,
+      task: task,
+      token: await this.getCaptcha(),
     };
-    if (continue_at !== undefined) payload.continue_at = continue_at;
-    if (continue_clip_id) payload.continue_clip_id = continue_clip_id;
-    if (task) payload.task = task;
     if (isCustom) {
       payload.tags = tags;
       payload.title = title;
