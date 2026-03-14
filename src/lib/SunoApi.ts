@@ -330,17 +330,124 @@ class SunoApi {
    * @returns {string|null} hCaptcha token. If no verification is required, returns null
    */
   public async getCaptcha(): Promise<string|null> {
+    if (!await this.captchaRequired())
+      return null;
+
+    logger.info('CAPTCHA required. Launching browser...')
+    const browser = await this.launchBrowser();
+    const page = await browser.newPage();
+    await page.goto('https://suno.com/create', { referer: 'https://www.google.com/', waitUntil: 'domcontentloaded', timeout: 0 });
+
+    logger.info('Waiting for Suno interface to load');
+    await page.waitForResponse('**/api/project/**\\?**', { timeout: 60000 });
+
+    if (this.ghostCursorEnabled)
+      this.cursor = await createCursor(page);
+
+    logger.info('Triggering the CAPTCHA');
     try {
-      const required = await this.captchaRequired();
-      if (!required) {
-        logger.info('CAPTCHA not required');
-        return null;
+      await page.getByLabel('Close').click({ timeout: 2000 });
+    } catch(e) {}
+
+    const textarea = page.locator('.custom-textarea');
+    await this.click(textarea);
+    await textarea.pressSequentially('Lorem ipsum', { delay: 80 });
+
+    const button = page.locator('button[aria-label="Create"]').locator('div.flex');
+    this.click(button);
+
+    const controller = new AbortController();
+    new Promise<void>(async (resolve, reject) => {
+      const frame = page.frameLocator('iframe[title*="hCaptcha"]');
+      const challenge = frame.locator('.challenge-container');
+      try {
+        let wait = true;
+        while (true) {
+          if (wait)
+            await waitForRequests(page, controller.signal);
+          const drag = (await challenge.locator('.prompt-text').first().innerText()).toLowerCase().includes('drag');
+          let captcha: any;
+          for (let j = 0; j < 3; j++) {
+            try {
+              logger.info('Sending the CAPTCHA to 2Captcha');
+              const payload: paramsCoordinates = {
+                body: (await challenge.screenshot({ timeout: 5000 })).toString('base64'),
+                lang: process.env.BROWSER_LOCALE
+              };
+              if (drag) {
+                payload.textinstructions = 'CLICK on the shapes at their edge or center as shown above—please be precise!';
+                payload.imginstructions = (await fs.readFile(path.join(process.cwd(), 'public', 'drag-instructions.jpg'))).toString('base64');
+              }
+              captcha = await this.solver.coordinates(payload);
+              break;
+            } catch(err: any) {
+              logger.info(err.message);
+              if (j != 2)
+                logger.info('Retrying...');
+              else
+                throw err;
+            }
+          }
+          if (drag) {
+            const challengeBox = await challenge.boundingBox();
+            if (challengeBox == null)
+              throw new Error('.challenge-container boundingBox is null!');
+            if (captcha.data.length % 2) {
+              logger.info('Solution does not have even amount of points required for dragging. Requesting new solution...');
+              this.solver.badReport(captcha.id);
+              wait = false;
+              continue;
+            }
+            for (let i = 0; i < captcha.data.length; i += 2) {
+              const data1 = captcha.data[i];
+              const data2 = captcha.data[i+1];
+              logger.info(JSON.stringify(data1) + JSON.stringify(data2));
+              await page.mouse.move(challengeBox.x + +data1.x, challengeBox.y + +data1.y);
+              await page.mouse.down();
+              await sleep(1.1);
+              await page.mouse.move(challengeBox.x + +data2.x, challengeBox.y + +data2.y, { steps: 30 });
+              await page.mouse.up();
+            }
+            wait = true;
+          } else {
+            for (const data of captcha.data) {
+              logger.info(data);
+              await this.click(challenge, { x: +data.x, y: +data.y });
+            };
+          }
+          this.click(frame.locator('.button-submit')).catch(e => {
+            if (e.message.includes('viewport'))
+              this.click(button);
+            else
+              throw e;
+          });
+        }
+      } catch(e: any) {
+        if (e.message.includes('been closed')
+          || e.message == 'AbortError')
+          resolve();
+        else
+          reject(e);
       }
-      logger.warn('CAPTCHA required but no solver configured — generation may fail');
-    } catch (err: any) {
-      logger.info('Could not check CAPTCHA requirement: ' + err.message);
-    }
-    return null;
+    }).catch(e => {
+      browser.browser()?.close();
+      throw e;
+    });
+    return (new Promise((resolve, reject) => {
+      page.route('**/api/generate/v2/**', async (route: any) => {
+        try {
+          logger.info('hCaptcha token received. Closing browser');
+          route.abort();
+          browser.browser()?.close();
+          controller.abort();
+          const request = route.request();
+          this.currentToken = request.headers().authorization.split('Bearer ').pop();
+          resolve(request.postDataJSON().token);
+        } catch(err) {
+          reject(err);
+        }
+      });
+    }));
   }
 
   /**
